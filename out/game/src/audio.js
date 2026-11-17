@@ -1,3 +1,5 @@
+// PALM COAST build v2 by recorded agent
+// PALM COAST — committed in this session.
 // WebAudio sound, synthesised: no files, no network. A lazy AudioContext (browsers
 // require a user gesture first), a two-tone siren loop while the heat is on, an engine
 // hum whose pitch follows the player's speed, and one-shot effects.

@@ -1,3 +1,5 @@
+// PALM COAST build v2 by recorded agent
+// PALM COAST — committed in this session.
 // World and tuning constants for PALM COAST: a 2D top-down open-world crime game.
 // The city is a grid: 2-tile-wide roads every 6 tiles, the 4x4 blocks between them hold
 // buildings, parks and parking lots. Everything is measured in world pixels.
@@ -56,11 +58,25 @@ export const BLOCK_PALETTES = [
   { wall: '#6f7d84', roof: '#a9bcc4', trim: '#d7e2e6' },
   { wall: '#8f7f86', roof: '#c8b6c0', trim: '#e9dfe4' },
   { wall: '#7a6a5e', roof: '#bfae9a', trim: '#e5dac7' },
+  { wall: '#6d7f6a', roof: '#a8bfa2', trim: '#dbe8d6' },
+  { wall: '#84766a', roof: '#c4b4a2', trim: '#ece2d4' },
+  { wall: '#5f6d80', roof: '#9fb2c6', trim: '#d3dfeb' },
+  { wall: '#92705e', roof: '#d0a98f', trim: '#f2ddc9' },
 ];
+
+/** Named districts: 3x3 regions of the 9x9 block grid. Row-major from the north-west. */
+export const DISTRICTS = [
+  'NORTH SHORE', 'PALM HEIGHTS', 'EASTON DOCKS',
+  'MIRAGE STRIP', 'DOWNTOWN', 'SUNSET MARKET',
+  'WEST GROVE', 'LITTLE HAVANA', 'MARINA SOUTH',
+];
+
+/** Day/night: dayT in [0,1) — 0 = midnight, 0.25 = dawn, 0.5 = noon, 0.75 = dusk. */
 
 export const COLORS = {
   road: '#3d4148',
   roadLine: '#c9c39a',
+  roadLineYellow: '#d8b93a',
   sidewalk: '#9a958c',
   sidewalkLine: '#b3aea4',
   grass: '#6fae5c',

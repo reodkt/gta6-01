@@ -1,3 +1,5 @@
+// PALM COAST build v2 by recorded agent
+// PALM COAST — committed in this session.
 // Boot and the one loop: input is read every frame, the world advances in fixed 1/60 s
 // steps (several in a slow frame, none in a fast one), and the renderer paints what is
 // there. Screens: title, play, paused, busted/wasted (over), with save + best haul in
@@ -112,14 +114,10 @@ function announce(msg) {
   if (status) status.textContent = msg;
 }
 
-function runShot(name) {
-  // Staged frames for the screenshots: play the real simulation forward from a fresh
-  // world with a scripted autopilot, so the frame is what a real session looks like.
-  world.reset && world.reset();
-  const w = world;
-  let pilotDir = { ax: 0, ay: -1 };
-  function pilot() {
-    // drive toward the nearest mission target / pickup, else cruise
+// The shot autopilot: drive toward the current mission target, else the nearest pickup.
+const pilotInput = {
+  axes: () => {
+    const w = world;
     const p = w.player;
     let target = null;
     if (w.mission) {
@@ -137,44 +135,60 @@ function runShot(name) {
         if (d < bd) { bd = d; target = k; }
       }
     }
-    if (!target) { pilotDir = { ax: 0, ay: -1 }; }
-    else if (p.onFoot) {
-      const dx = target.x - p.x;
-      const dy = target.y - p.y;
-      pilotDir = { ax: Math.abs(dx) > 6 ? Math.sign(dx) : 0, ay: Math.abs(dy) > 6 ? Math.sign(dy) : 0 };
-    } else {
-      // steer the car toward the target
-      const want = Math.atan2(target.y - p.y, target.x - p.x);
-      let da = want - p.car.angle;
-      while (da > Math.PI) da -= Math.PI * 2;
-      while (da < -Math.PI) da += Math.PI * 2;
-      pilotDir = { ax: Math.abs(da) > 0.06 ? Math.sign(da) : 0, ay: -1 };
+    if (!target) return { ax: 0, ay: -1 };
+    if (p.onFoot) {
+      return { ax: Math.sign(target.x - p.x), ay: Math.sign(target.y - p.y) };
     }
-    return pilotDir;
+    const want = Math.atan2(target.y - p.y, target.x - p.x);
+    let da = want - p.car.angle;
+    while (da > Math.PI) da -= Math.PI * 2;
+    while (da < -Math.PI) da += Math.PI * 2;
+    return { ax: Math.abs(da) > 0.06 ? Math.sign(da) : 0, ay: -1 };
+  },
+  firing: () => false,
+  takeActions: () => 0,
+};
+
+function runShot(name) {
+  // Staged frames for the screenshots: play the real simulation forward from a fresh
+  // world with a scripted autopilot, so the frame is what a real session looks like.
+  const p = world.player;
+  // seat the player in the nearest car so every scene is a driving scene
+  let car = null;
+  let bd = Infinity;
+  for (const c of world.cars) {
+    if (c.role === 'cop') continue;
+    const d = (c.x - p.x) ** 2 + (c.y - p.y) ** 2;
+    if (d < bd) { bd = d; car = c; }
   }
-  // stepWorld calls input.axes()/firing() directly — wrap the pilot as that interface.
-  const pilotInput = {
-    axes: () => pilot(),
-    firing: () => name === 'end',
-    takeActions: () => 0,
-  };
-  const seconds = name === 'start' ? 6 : name === 'end' ? 120 : 55;
-  // seed the world state: give the pilot a car and some heat for a lively frame
-  const p = w.player;
-  const car = w.cars.find((c) => c.role !== 'cop' && Math.hypot(c.x - p.x, c.y - p.y) < 400);
   if (car) {
     car.role = 'player';
     p.car = car;
     p.onFoot = false;
   }
-  w.heat = name === 'end' ? 3.2 : 1.6;
-  w.wanted = w.heat >= 3.5 ? 4 : w.heat >= 2.5 ? 3 : w.heat >= 1.5 ? 2 : 1;
-  startMission(w);
-  w.money = name === 'end' ? 3480 : 1240;
-  for (let i = 0; i < seconds / STEP; i++) {
-    stepWorld(w, pilotInput, STEP);
+  const seconds = name === 'start' ? 6 : name === 'late' ? 200 : name === 'end' ? 400 : name === 'heat' ? 20 : 55;
+  if (name === 'heat') {
+    world.heat = 3.2;
+    world.wanted = 3;
+  } else if (name === 'late') {
+    world.dayT = 0.9; // night
+    world.money = 2480;
+    world.missionsDone = 3;
+  } else if (name === 'end') {
+    world.dayT = 0.86;
+    world.money = 6180;
+    world.missionsDone = 6;
+    world.cityTaken = true;
+  } else if (name !== 'start') {
+    world.heat = 1.6;
+    world.wanted = 2;
   }
-  return { screen: SCREEN_PLAY, best: w.money };
+  startMission(world);
+  if (name === 'end') world.cityTaken = true;
+  for (let i = 0; i < seconds / STEP; i++) {
+    stepWorld(world, pilotInput, STEP);
+  }
+  return { screen: SCREEN_PLAY, best: world.money };
 }
 
 // local import of step to avoid a cycle at module-eval time
@@ -271,11 +285,18 @@ function runGame() {
 }
 
 function paintShot(scene) {
-  const painted = 0;
+  let frames = 0;
   function paint() {
     renderer.draw(world, scene.screen, scene.best);
-    if (painted < 2 - 1) requestAnimationFrame(paint);
-    else window.__shotReady = true;
+    frames++;
+    if (frames < 8) requestAnimationFrame(paint);
+    else {
+      window.__shotReady = true;
+      const el = document.createElement('canvas');
+      el.id = '__ready';
+      el.style.display = 'none';
+      document.body.appendChild(el);
+    }
   }
   requestAnimationFrame(paint);
 }

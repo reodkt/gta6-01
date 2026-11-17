@@ -3,7 +3,7 @@
 // The renderer: one canvas, one draw per frame. Draws the city tiles, then shadows,
 // then everything that moves, then the HUD (minimap, wanted stars, cash, HP, mission),
 // then the screens (title, paused, busted, wasted). Everything is flat-colour 2D.
-import { BLOCK_PALETTES, CAR, COLORS, COP_LIGHTS, PLAYER, TILE, T_BUILDING, T_LOT, T_PARK, T_ROAD, T_SIDEWALK, WORLD_H, WORLD_W } from './config.js';
+import { BLOCK_PALETTES, CAR, COLORS, COP_LIGHTS, DISTRICTS, PLAYER, TILE, T_BUILDING, T_LOT, T_PARK, T_ROAD, T_SIDEWALK, WORLD_H, WORLD_W } from './config.js';
 
 export const SCREEN_TITLE = 'title';
 export const SCREEN_PLAY = 'play';
@@ -30,7 +30,7 @@ export function createRenderer(canvas) {
     if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = lw || 2; ctx.stroke(); }
   }
 
-  function drawWorldLayer(world, cam) {
+  function drawWorldLayer(world, cam, dayT) {
     // tiles
     const tx0 = Math.max(0, Math.floor(cam.x / TILE) - 1);
     const ty0 = Math.max(0, Math.floor(cam.y / TILE) - 1);
@@ -50,19 +50,34 @@ export function createRenderer(canvas) {
         ctx.fillStyle = base;
         ctx.fillRect(x, y, TILE + 1, TILE + 1);
         if (t === T_ROAD) {
-          // lane markings along the road direction
+          // dashed yellow centre line between the two lanes
           const gx = tx % 6;
           const gy = ty % 6;
-          ctx.fillStyle = COLORS.roadLine;
-          if (gy === 0) ctx.fillRect(x, y + TILE * 0.48, TILE, 3);
-          else if (gy === 1) ctx.fillRect(x, y + TILE * 0.48, TILE, 3);
-          else if (gx === 0) ctx.fillRect(x + TILE * 0.48, y, 3, TILE);
-          else if (gx === 1) ctx.fillRect(x + TILE * 0.48, y, 3, TILE);
+          const dash = ((tx + ty) % 4) < 2;
+          ctx.fillStyle = COLORS.roadLineYellow;
+          if ((gy === 0 || gy === 1) && dash) ctx.fillRect(x + 4, y + TILE * 0.48, TILE - 8, 3);
+          else if ((gx === 0 || gx === 1) && dash) ctx.fillRect(x + TILE * 0.48, y + 4, 3, TILE - 8);
         } else if (t === T_SIDEWALK) {
           ctx.strokeStyle = COLORS.sidewalkLine;
           ctx.lineWidth = 1;
           ctx.strokeRect(x + 0.5, y + 0.5, TILE - 1, TILE - 1);
         }
+      }
+    }
+    // street lamps: one per road-lane tile corner on a hash pattern
+    for (let ty = ty0; ty <= ty1; ty++) {
+      for (let tx = tx0; tx <= tx1; tx++) {
+        if (world.tiles[ty * world.mw + tx] !== T_ROAD) continue;
+        const gx = tx % 6;
+        const gy = ty % 6;
+        const edge = (gy === 0 && tx % 18 === 0) || (gx === 0 && ty % 18 === 0);
+        if (!edge) continue;
+        const x = tx * TILE - cam.x;
+        const y = ty * TILE - cam.y;
+        circle(x + 4, y + 6, 5, COLORS.shadow);
+        ctx.fillStyle = '#3c4046';
+        ctx.fillRect(x + 2, y + 4, 5, 5);
+        circle(x + 4, y + 4, 3, dayT > 0.75 || dayT < 0.22 ? '#ffe9a8' : '#8b8f96');
       }
     }
     // trees
@@ -433,6 +448,25 @@ export function createRenderer(canvas) {
 
   function drawHUD(world) {
     const p = world.player;
+    // day/night clock: dayT 0.28 start-of-day
+    const hour = Math.floor(((world.dayT + 0.5) % 1) * 24);
+    const isNight = world.dayT > 0.78 || world.dayT < 0.23;
+    ctx.fillStyle = COLORS.hud;
+    roundRect(VIEW_W / 2 - 300, 18, 180, 34, 8);
+    ctx.fill();
+    ctx.fillStyle = isNight ? COLORS.gold : COLORS.hudText;
+    ctx.font = 'bold 16px monospace';
+    ctx.fillText((isNight ? '☾ ' : '☀ ') + String(hour).padStart(2, '0') + ':00', VIEW_W / 2 - 282, 41);
+    if (world.district) {
+      ctx.fillStyle = COLORS.hud;
+      roundRect(VIEW_W / 2 - 110, 18, 220, 34, 8);
+      ctx.fill();
+      ctx.fillStyle = COLORS.gold;
+      ctx.font = 'bold 15px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(world.district, VIEW_W / 2, 41);
+      ctx.textAlign = 'left';
+    }
     // top-left: cash + wanted
     ctx.fillStyle = COLORS.hud;
     roundRect(18, 18, 250, 108, 10);
@@ -476,7 +510,7 @@ export function createRenderer(canvas) {
       ctx.fillStyle = COLORS.hudText;
       ctx.fillText('CAR', hx + 216, hy + 51);
     }
-    // mission box
+    // mission + dialogue box
     if (world.mission) {
       const m = world.mission;
       ctx.fillStyle = COLORS.hud;
@@ -486,7 +520,7 @@ export function createRenderer(canvas) {
       ctx.stroke();
       ctx.fillStyle = COLORS.gold;
       ctx.font = 'bold 14px monospace';
-      ctx.fillText('MISSION ' + (world.missionsDone + 1) + ' — $' + m.reward, VIEW_W / 2 - 284, VIEW_H - 70);
+      ctx.fillText('MISSION ' + (world.missionsDone + 1) + '/7 — $' + m.reward, VIEW_W / 2 - 284, VIEW_H - 70);
       ctx.fillStyle = COLORS.hudText;
       ctx.font = '13px monospace';
       let progress = '';
@@ -498,8 +532,26 @@ export function createRenderer(canvas) {
         progress = ` (${m.targets.length - left}/${m.targets.length} wrecked)`;
       } else if (m.kind === 'survive') {
         progress = ` (${Math.min(40, Math.floor(world.surviveTimer))}s/40s)`;
+      } else if (m.kind === 'steal') {
+        progress = ' (jack any car)';
       }
       ctx.fillText(m.brief + progress, VIEW_W / 2 - 284, VIEW_H - 48);
+    }
+    // Manny dialogue bubble
+    if (world.dialog && world.dialogT > 0) {
+      ctx.globalAlpha = Math.min(1, world.dialogT / 0.6);
+      ctx.fillStyle = 'rgba(20, 16, 10, 0.82)';
+      roundRect(VIEW_W / 2 - 320, VIEW_H - 158, 640, 50, 10);
+      ctx.fill();
+      ctx.strokeStyle = COLORS.gold;
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      ctx.fillStyle = '#ffe9a8';
+      ctx.font = 'italic 14px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(world.dialog, VIEW_W / 2, VIEW_H - 128);
+      ctx.textAlign = 'left';
+      ctx.globalAlpha = 1;
     }
     drawMinimap(world);
   }
@@ -525,15 +577,37 @@ export function createRenderer(canvas) {
         y: Math.max(0, Math.min(WORLD_H - VIEW_H, p.y - VIEW_H / 2)),
       };
       // daylight tint
-      ctx.fillStyle = '#8fb8c9';
+      const dayT = world.dayT ?? 0.5;
+      const night = dayT > 0.78 || dayT < 0.23;
+      const dusk = !night && (dayT > 0.68 || dayT < 0.3);
+      ctx.fillStyle = night ? '#1c2438' : dusk ? '#c98f6f' : '#8fb8c9';
       ctx.fillRect(0, 0, VIEW_W, VIEW_H);
-      drawWorldLayer(world, cam);
+      drawWorldLayer(world, cam, dayT);
       drawBuildings(world, cam);
       drawPickups(world, cam, world.time);
       for (const c of world.cars) drawCar(c, cam, world.time, c.role === 'player');
       for (const ped of world.peds) drawPed(ped, cam, world.time);
       for (const cop of world.cops) if (cop.role === 'cop') drawCop(cop, cam);
       drawPlayer(world, cam);
+      // night/dusk overlay above the world, below the HUD
+      if (night) { ctx.fillStyle = 'rgba(10, 14, 34, 0.45)'; ctx.fillRect(0, 0, VIEW_W, VIEW_H); }
+      else if (dusk) { ctx.fillStyle = 'rgba(120, 60, 40, 0.18)'; ctx.fillRect(0, 0, VIEW_W, VIEW_H); }
+      if (world.cityTaken) {
+        ctx.fillStyle = 'rgba(12, 14, 20, 0.55)';
+        roundRect(VIEW_W / 2 - 260, VIEW_H / 2 - 44, 520, 88, 12);
+        ctx.fill();
+        ctx.strokeStyle = COLORS.gold;
+        ctx.lineWidth = 3;
+        ctx.stroke();
+        ctx.textAlign = 'center';
+        ctx.fillStyle = COLORS.gold;
+        ctx.font = 'bold 44px monospace';
+        ctx.fillText('CITY TAKEN', VIEW_W / 2, VIEW_H / 2 + 2);
+        ctx.fillStyle = COLORS.hudText;
+        ctx.font = '15px monospace';
+        ctx.fillText('Manny\'s empire is complete — the Coast is yours.', VIEW_W / 2, VIEW_H / 2 + 30);
+        ctx.textAlign = 'left';
+      }
       drawBullets(world, cam);
 
       if (screen === SCREEN_PLAY || screen === SCREEN_PAUSED) {

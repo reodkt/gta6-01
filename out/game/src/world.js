@@ -1,9 +1,11 @@
+// PALM COAST build v2 by recorded agent
+// PALM COAST — committed in this session.
 // The world: the city grid, everything that lives in it, and the simulation.
 // PALM COAST is a 54x54-tile grid; roads run every 6 tiles both ways, the 4x4 blocks
 // between them hold buildings, parks and parking lots. Traffic drives the road lanes,
 // pedestrians walk the sidewalks, cops chase when the heat rises, missions pay cash.
 import {
-  CAR, COLORS, COP_BASE_SPEED, COP_LIGHTS, COUNTS, MH, MW, PLAYER, STEP, T_BUILDING, T_LOT, T_PARK,
+  CAR, COLORS, COP_BASE_SPEED, COP_LIGHTS, COUNTS, DISTRICTS, MH, MW, PLAYER, STEP, T_BUILDING, T_LOT, T_PARK,
   T_ROAD, T_SIDEWALK, TILE, TRAFFIC_SPEED, WORLD_H, WORLD_W,
 } from './config.js';
 import { createRandom, hash2 } from './random.js';
@@ -12,10 +14,16 @@ export const EV_EVENT_NONE = 0;
 export const EV_PLAYER_DEAD = 1;
 export const EV_BUSTED = 2;
 
+// The story: seven chained jobs for Manny, each with a line of dialogue. Finishing all
+// seven ends the run with "CITY TAKEN".
 const MISSIONS = [
-  { id: 'collect', brief: 'Collect the drop bags marked on your map.', reward: 400, count: 3, kind: 'collect' },
-  { id: 'wreck', brief: 'Wreck the rival gang cars prowling the docks.', reward: 650, count: 3, kind: 'wreck' },
-  { id: 'survive', brief: 'Lose the heat: survive 40 seconds at 2+ stars.', reward: 800, count: 1, kind: 'survive' },
+  { id: 'collect', brief: 'Pick up the drop at the marina.', dialog: 'Manny: "Easy money, primo — three bags by the water. Don\'t be late."', reward: 400, count: 3, kind: 'collect' },
+  { id: 'wreck', brief: 'Wreck the rival gang cars prowling the docks.', dialog: 'Manny: "Los Muertos are muscling in. Turn their rides into scrap."', reward: 650, count: 3, kind: 'wreck' },
+  { id: 'steal', brief: 'Boost a car and lose the heat.', dialog: 'Manny: "I need wheels that aren\'t ours. Jack one, then shake the stars."', reward: 700, count: 1, kind: 'steal' },
+  { id: 'collect', brief: 'Collect the cocaine pallets off the Strip.', dialog: 'Manny: "Big score tonight. Three pallets, Mirage Strip. Move fast."', reward: 850, count: 4, kind: 'collect' },
+  { id: 'survive', brief: 'Lose the heat: survive 40 seconds at 2+ stars.', dialog: 'Manny: "Cops are onto us. Get loud and get gone — 40 seconds, hermano."', reward: 900, count: 1, kind: 'survive' },
+  { id: 'wreck', brief: 'Ambush the police convoy downtown.', dialog: 'Manny: "Last piece of the plan. Send their convoy to the junkyard."', reward: 1100, count: 4, kind: 'wreck' },
+  { id: 'collect', brief: 'Grab the final payoff stash — three cases.', dialog: 'Manny: "This is it, Johnny. Three cases and the Coast is ours."', reward: 1500, count: 3, kind: 'collect' },
 ];
 
 const PED_NAMES = ['Manny', 'Rosa', 'Duke', 'Vera', 'Chico', 'Lupe', 'Bones', 'Sal', 'Nina', 'Tito'];
@@ -70,6 +78,7 @@ export function createWorld(seed) {
     player: null, cars: [], peds: [], cops: [], bullets: [], pickups: [], particles: [], texts: [],
     heat: 0, wanted: 0, heatCool: 0, money: 0, bank: 0,
     mission: null, missionsDone: 0, missionTimer: 0, surviveTimer: 0,
+    district: null, districtT: 0, dialog: null, dialogT: 0, cityTaken: false,
     stats: { kills: 0, steals: 0, deliveries: 0 },
     dead: false, busted: false, deadTimer: 0, dayT: 0.28,
     events: [],
@@ -228,6 +237,9 @@ export function step(world, input, dt) {
   updateParticles(world, dt);
   updateHeat(world, dt);
   updateMission(world, dt);
+  updateDistrict(world, dt);
+
+  if (world.dialogT > 0) world.dialogT -= dt;
 
   for (const t of world.texts) t.life -= dt;
   world.texts = world.texts.filter((t) => t.life > 0);
@@ -747,10 +759,28 @@ function updateParticles(world, dt) {
   world.particles = world.particles.filter((pt) => pt.life > 0);
 }
 
+// --- districts ---
+
+function districtName(world, tx, ty) {
+  const col = Math.min(2, Math.floor((tx / world.mw) * 3));
+  const row = Math.min(2, Math.floor((ty / world.mh) * 3));
+  return DISTRICTS[row * 3 + col];
+}
+
+function updateDistrict(world, dt) {
+  const p = world.player;
+  const name = districtName(world, Math.floor(p.x / TILE), Math.floor(p.y / TILE));
+  if (name !== world.district) {
+    world.district = name;
+    world.districtT = 3.4;
+  }
+  if (world.districtT > 0) world.districtT -= dt;
+}
+
 // --- missions ---
 
 export function startMission(world) {
-  if (world.mission) return;
+  if (world.mission || world.cityTaken) return;
   const m = MISSIONS[world.missionsDone % MISSIONS.length];
   const p = world.player;
   const mission = { ...m, targets: [], started: world.time };
@@ -778,18 +808,28 @@ export function startMission(world) {
   }
   world.mission = mission;
   world.surviveTimer = 0;
+  world.dialog = m.dialog;
+  world.dialogT = 6.5;
   world.audio && world.audio.mission();
-  addText(world, p.x, p.y - 40, 'MISSION: ' + m.brief, COLORS.gold);
+  addText(world, p.x, p.y - 40, 'MISSION ' + (world.missionsDone + 1) + ': ' + m.brief, COLORS.gold);
 }
 
 function completeMission(world) {
   if (!world.mission) return;
   world.money += world.mission.reward;
   world.missionsDone++;
+  const reward = world.mission.reward;
   world.mission = null;
   world.audio && world.audio.mission();
   world.audio && world.audio.cash();
-  addText(world, world.player.x, world.player.y - 40, `MISSION COMPLETE +$${MISSIONS[(world.missionsDone - 1) % MISSIONS.length].reward}`, COLORS.green);
+  if (world.missionsDone >= MISSIONS.length) {
+    world.cityTaken = true;
+    world.dialog = 'Manny: "The whole Coast is ours, Johnny. CITY TAKEN."';
+    world.dialogT = 999;
+    addText(world, world.player.x, world.player.y - 40, 'CITY TAKEN — the Coast belongs to you', COLORS.gold);
+  } else {
+    addText(world, world.player.x, world.player.y - 40, `MISSION COMPLETE +$${reward}`, COLORS.green);
+  }
 }
 
 function updateMission(world, dt) {
@@ -813,6 +853,12 @@ function updateMission(world, dt) {
       for (const c of m.targets) {
         if (c.hp <= 0 && c.role !== 'wreck') { c.role = 'wreck'; }
       }
+    }
+  } else if (m.kind === 'steal') {
+    if (m.startSteals === undefined) m.startSteals = world.stats.steals;
+    if (world.stats.steals > m.startSteals) {
+      addText(world, p.x, p.y - 20, 'Nice ride — now lose the stars', COLORS.gold);
+      completeMission(world);
     }
   }
   // survive handled in updateHeat
