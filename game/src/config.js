@@ -32,7 +32,7 @@ export const PLAYER = {
   punchRange: 34,
 };
 
-/** Car tuning (player-driven). */
+/** Car tuning (player-driven). Smooth analog-style accel/brake with light drift. */
 export const CAR = {
   maxSpeed: 330,
   reverse: -120,
@@ -42,6 +42,10 @@ export const CAR = {
   turn: 2.7,
   width: 26,
   length: 46,
+  // driving-feel extras
+  coastDrag: 0.9,      // per-second retention factor when coasting off throttle
+  driftSlip: 0.82,     // lateral velocity retention while drifting (lower = grippier)
+  skidSpeed: 190,      // min speed for skid marks when braking hard
 };
 
 export const TRAFFIC_SPEED = 130;

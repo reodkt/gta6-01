@@ -157,6 +157,10 @@ export function createAudio() {
     door() {
       blip(220, 0.05, 'triangle', 0.08);
     },
+    honk() {
+      blip(392, 0.18, 'square', 0.06);
+      blip(494, 0.18, 'square', 0.05);
+    },
     mission() {
       blip(523, 0.12, 'triangle', 0.14);
       setTimeout(() => blip(659, 0.12, 'triangle', 0.14), 120);
