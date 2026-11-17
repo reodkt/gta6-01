@@ -1,3 +1,4 @@
+// PALM COAST — committed in this session.
 // World and tuning constants for PALM COAST: a 2D top-down open-world crime game.
 // The city is a grid: 2-tile-wide roads every 6 tiles, the 4x4 blocks between them hold
 // buildings, parks and parking lots. Everything is measured in world pixels.

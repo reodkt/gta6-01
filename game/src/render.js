@@ -1,3 +1,4 @@
+// PALM COAST — committed in this session.
 // The renderer: one canvas, one draw per frame. Draws the city tiles, then shadows,
 // then everything that moves, then the HUD (minimap, wanted stars, cash, HP, mission),
 // then the screens (title, paused, busted, wasted). Everything is flat-colour 2D.

@@ -1,3 +1,4 @@
+// PALM COAST — committed in this session.
 // A seeded PRNG (mulberry32) so a seed always rebuilds the same city and the same
 // screenshot scenarios play back identically.
 export function createRandom(seed) {
