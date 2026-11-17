@@ -32,6 +32,180 @@ export function createRenderer(canvas) {
   canvas.height = VIEW_H;
   ctx.imageSmoothingEnabled = false;
 
+  // --- explosion FX: register a boom when a car crosses from burning to destroyed ---
+  function updateBooms(world, cam, time) {
+    for (const c of world.cars) {
+      const prev = state.burnPrev.get(c);
+      if (c.burn === -999 && prev !== undefined && prev !== -999) {
+        // detonation frame: flash + expanding shockwave + debris spray
+        state.booms.push({ x: c.x, y: c.y, t0: time });
+        state.shake = Math.max(state.shake, 10);
+        for (let i = 0; i < 26; i++) {
+          const a = Math.random() * Math.PI * 2;
+          const s = 90 + Math.random() * 190;
+          world.particles.push({
+            x: c.x, y: c.y,
+            vx: Math.cos(a) * s, vy: Math.sin(a) * s,
+            life: 0.5 + Math.random() * 0.6,
+            color: Math.random() < 0.5 ? '#f5c542' : Math.random() < 0.5 ? '#e05a2f' : '#3c4046',
+            size: 2 + Math.random() * 4,
+          });
+        }
+      }
+      state.burnPrev.set(c, c.burn);
+    }
+    for (const b of state.booms) b.age = time - b.t0;
+    state.booms = state.booms.filter((b) => b.age < 0.7);
+  }
+
+  function drawBooms(world, cam) {
+    for (const b of state.booms) {
+      const x = b.x - cam.x;
+      const y = b.y - cam.y;
+      const a = b.age;
+      // shockwave ring: expands and fades over ~0.7s
+      const r = 14 + (a / 0.7) * 150;
+      ctx.strokeStyle = `rgba(255, 240, 200, ${Math.max(0, 0.85 * (1 - a / 0.7))})`;
+      ctx.lineWidth = 4 * (1 - a / 0.7) + 1;
+      circle(x, y, r, null, null, 0);
+      ctx.stroke();
+      // white-hot flash in the first 100ms
+      if (a < 0.12) {
+        ctx.fillStyle = `rgba(255, 250, 230, ${0.9 * (1 - a / 0.12)})`;
+        circle(x, y, 44, null, null, 0);
+        ctx.fill();
+      }
+      // warm glow decaying
+      ctx.fillStyle = `rgba(240, 150, 60, ${Math.max(0, 0.35 * (1 - a / 0.5))})`;
+      circle(x, y, 30 + a * 30, null, null, 0);
+      ctx.fill();
+    }
+  }
+
+  // --- tire smoke: puffs behind the player while skidding (car drifting fast turns) ---
+  function drawSmoke(world, cam, time) {
+    const c = world.player.onFoot ? null : world.player.car;
+    if (c && Math.abs(c.speed) > 140) {
+      const drift = Math.abs(Math.sin(c.angle) * c.vx - Math.cos(c.angle) * c.vy);
+      if (drift > 60 && Math.random() < 0.5) {
+        world.particles.push({
+          x: c.x - Math.cos(c.angle) * 20, y: c.y - Math.sin(c.angle) * 20,
+          vx: (Math.random() - 0.5) * 30, vy: (Math.random() - 0.5) * 30 - 10,
+          life: 0.7, color: 'rgba(210,210,215,0.55)', size: 7 + Math.random() * 6,
+        });
+      }
+    }
+    void time;
+  }
+
+  // --- fog of war: coarse grid over the minimap, chunk marked explored when the player passes ---
+  function updateFog(world) {
+    const W = 27;
+    if (state.fogW !== W) {
+      state.fogW = W;
+      state.fog = new Uint8Array(W * W);
+    }
+    const p = world.player;
+    const cx = Math.floor((p.x / WORLD_W) * W);
+    const cy = Math.floor((p.y / WORLD_H) * W);
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        const fx = cx + dx;
+        const fy = cy + dy;
+        if (fx >= 0 && fy >= 0 && fx < W && fy < W) state.fog[fy * W + fx] = 1;
+      }
+    }
+  }
+
+  function drawLightCone(world, cam, night) {
+    // headlight cones at night for the player + moving traffic + cop cars
+    if (!night) return;
+    const cones = [];
+    for (const c of world.cars) {
+      if (c.burn || c.role === 'wreck') continue;
+      if (c.role !== 'player' && c.role !== 'cop' && Math.abs(c.speed) < 8) continue;
+      cones.push(c);
+    }
+    for (const c of cones) {
+      const x = c.x - cam.x;
+      const y = c.y - cam.y;
+      if (x < -160 || y < -160 || x > VIEW_W + 160 || y > VIEW_H + 160) continue;
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.rotate(c.angle);
+      const len = 150;
+      const hw = 44;
+      const grad = ctx.createRadialGradient(20, 0, 6, 20 + len / 2, 0, len);
+      grad.addColorStop(0, 'rgba(255, 240, 190, 0.28)');
+      grad.addColorStop(1, 'rgba(255, 240, 190, 0)');
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.moveTo(20, -6);
+      ctx.lineTo(20 + len, -hw);
+      ctx.lineTo(20 + len, hw);
+      ctx.lineTo(20, 6);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    }
+  }
+
+  function drawLampGlow(world, cam, dayT) {
+    // soft radial pool of light under each lit street lamp after dusk
+    const hour = ((dayT + 0.5) % 1) * 24;
+    if (hour < 19 && hour > 6.5) return;
+    const lit = [];
+    for (let ty = Math.max(0, Math.floor(cam.y / TILE) - 2); ty <= Math.min(world.mh - 1, Math.ceil((cam.y + VIEW_H) / TILE) + 1); ty++) {
+      for (let tx = Math.max(0, Math.floor(cam.x / TILE) - 2); tx <= Math.min(world.mw - 1, Math.ceil((cam.x + VIEW_W) / TILE) + 1); tx++) {
+        if (world.tiles[ty * world.mw + tx] !== T_ROAD) continue;
+        const gx = tx % 6;
+        const gy = ty % 6;
+        const edge = (gy === 0 && tx % 18 === 0) || (gx === 0 && ty % 18 === 0);
+        if (!edge) continue;
+        const x = tx * TILE - cam.x + 4;
+        const y = ty * TILE - cam.y + 6;
+        const flick = 0.75 + 0.25 * Math.sin(world.time * 9 + tx * 3.7 + ty * 1.3);
+        const g = ctx.createRadialGradient(x, y, 2, x, y, 70);
+        g.addColorStop(0, `rgba(255, 226, 150, ${0.20 * flick})`);
+        g.addColorStop(1, 'rgba(255, 226, 150, 0)');
+        ctx.fillStyle = g;
+        ctx.fillRect(x - 70, y - 70, 140, 140);
+        lit.push([x, y]);
+      }
+    }
+    state.glowLights = lit;
+  }
+
+  function drawWater(world, cam, time, dayT, night) {
+    // shimmer at the coast: animated wave stripes inside ocean tiles
+    const base = night ? '#16233c' : '#2c6d9e';
+    const tx0 = Math.max(0, Math.floor(cam.x / TILE));
+    const ty0 = Math.max(0, Math.floor(cam.y / TILE));
+    const tx1 = Math.min(world.mw - 1, Math.ceil((cam.x + VIEW_W) / TILE));
+    const ty1 = Math.min(world.mh - 1, Math.ceil((cam.y + VIEW_H) / TILE));
+    for (let ty = ty0; ty <= ty1; ty++) {
+      for (let tx = tx0; tx <= tx1; tx++) {
+        if (world.tiles[ty * world.mw + tx] !== 5) continue;
+        const x = tx * TILE - cam.x;
+        const y = ty * TILE - cam.y;
+        ctx.fillStyle = base;
+        ctx.fillRect(x, y, TILE, TILE);
+        // a few moving highlight arcs per tile
+        for (let i = 0; i < 2; i++) {
+          const ph = world.time * 1.6 + tx * 0.7 + ty * 0.53 + i * 2.2;
+          const wy = y + ((ph % 1) * TILE);
+          const wx = x + ((Math.sin(ph * 2.7) * 0.5 + 0.5) * (TILE - 34));
+          ctx.strokeStyle = `rgba(210, 235, 250, ${0.14 + 0.08 * Math.sin(ph * 3) + (dayT > 0.4 && dayT < 0.6 ? 0.05 : 0)})`;
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.moveTo(wx, wy);
+          ctx.quadraticCurveTo(wx + 17, wy - 4, wx + 34, wy);
+          ctx.stroke();
+        }
+      }
+    }
+  }
+
   function circle(x, y, r, fill, stroke, lw) {
     ctx.beginPath();
     ctx.arc(x, y, r, 0, Math.PI * 2);
@@ -589,18 +763,36 @@ export function createRenderer(canvas) {
       const dayT = world.dayT ?? 0.5;
       const night = dayT > 0.78 || dayT < 0.23;
       const dusk = !night && (dayT > 0.68 || dayT < 0.3);
+      updateBooms(world, cam, world.time);
+      updateFog(world);
+      // screenshake
+      ctx.save();
+      if (state.shake > 0.2) {
+        ctx.translate((Math.random() - 0.5) * state.shake, (Math.random() - 0.5) * state.shake);
+        state.shake *= 0.88;
+      } else state.shake = 0;
       ctx.fillStyle = night ? '#1c2438' : dusk ? '#c98f6f' : '#8fb8c9';
-      ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+      ctx.fillRect(-40, -40, VIEW_W + 80, VIEW_H + 80);
       drawWorldLayer(world, cam, dayT);
+      drawLampGlow(world, cam, dayT);
       drawBuildings(world, cam);
       drawPickups(world, cam, world.time);
       for (const c of world.cars) drawCar(c, cam, world.time, c.role === 'player');
       for (const ped of world.peds) drawPed(ped, cam, world.time);
       for (const cop of world.cops) if (cop.role === 'cop') drawCop(cop, cam);
       drawPlayer(world, cam);
+      drawLightCone(world, cam, world.dayT);
+      drawSmoke(world, cam, world.time);
+      drawBooms(world, cam);
+      ctx.restore(); // end screenshake
       // night/dusk overlay above the world, below the HUD
-      if (night) { ctx.fillStyle = 'rgba(10, 14, 34, 0.45)'; ctx.fillRect(0, 0, VIEW_W, VIEW_H); }
-      else if (dusk) { ctx.fillStyle = 'rgba(120, 60, 40, 0.18)'; ctx.fillRect(0, 0, VIEW_W, VIEW_H); }
+      if (night) {
+        ctx.fillStyle = 'rgba(10, 14, 34, 0.45)';
+        ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+      } else if (dusk) {
+        ctx.fillStyle = 'rgba(120, 60, 40, 0.18)';
+        ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+      }
       if (world.cityTaken) {
         ctx.fillStyle = 'rgba(12, 14, 20, 0.55)';
         roundRect(VIEW_W / 2 - 260, VIEW_H / 2 - 44, 520, 88, 12);
@@ -617,8 +809,6 @@ export function createRenderer(canvas) {
         ctx.fillText('Manny\'s empire is complete — the Coast is yours.', VIEW_W / 2, VIEW_H / 2 + 30);
         ctx.textAlign = 'left';
       }
-      drawBullets(world, cam);
-
       if (screen === SCREEN_PLAY || screen === SCREEN_PAUSED) {
         drawHUD(world);
         if (screen === SCREEN_PAUSED) {
