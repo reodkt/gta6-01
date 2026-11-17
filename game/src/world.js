@@ -679,7 +679,7 @@ function updateCops(world, dt) {
     if (world.roadblockCd <= 0 && cars.length >= 2) {
       world.roadblockCd = 14;
       const pcar = p.onFoot ? null : p.car;
-      if (pcar && Math.abs(pcar.speed) > 120) {
+      if (pcar && Math.abs(pcar.speed) > 60) {
         const ahead = 620;
         const bx = p.x + Math.cos(pcar.angle) * ahead;
         const by = p.y + Math.sin(pcar.angle) * ahead;

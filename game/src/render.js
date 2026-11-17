@@ -19,6 +19,15 @@ const CAR_L = 44;
 
 export function createRenderer(canvas) {
   const ctx = canvas.getContext('2d');
+  const state = {
+    booms: [],            // explosion FX: {x, y, t0} in world coords
+    burnPrev: new Map(),  // car -> previous burn value, to detect detonation frames
+    glowLights: [],       // street lamp positions (screen coords) lit this frame
+    prevHp: null,         // player hp last frame, for the red damage flash
+    hurtT: 0,             // seconds left on the damage flash
+    shake: 0,             // screenshake magnitude in px
+    fogW: 0, fog: null,   // minimap fog-of-war grid (explored chunk booleans)
+  };
   canvas.width = VIEW_W;
   canvas.height = VIEW_H;
   ctx.imageSmoothingEnabled = false;
