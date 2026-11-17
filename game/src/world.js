@@ -1,3 +1,4 @@
+// PALM COAST build v2 by recorded agent
 // PALM COAST — committed in this session.
 // The world: the city grid, everything that lives in it, and the simulation.
 // PALM COAST is a 54x54-tile grid; roads run every 6 tiles both ways, the 4x4 blocks

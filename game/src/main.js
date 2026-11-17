@@ -1,3 +1,4 @@
+// PALM COAST build v2 by recorded agent
 // PALM COAST — committed in this session.
 // Boot and the one loop: input is read every frame, the world advances in fixed 1/60 s
 // steps (several in a slow frame, none in a fast one), and the renderer paints what is
