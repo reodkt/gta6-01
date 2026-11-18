@@ -75,7 +75,7 @@ export function createWorld(seed) {
   const world = {
     seed, rand, mw, mh, tiles, time: 0,
     buildings: [], trees: [], blocks: [],
-    player: null, cars: [], peds: [], cops: [], bullets: [], pickups: [], particles: [], texts: [],
+    player: null, cars: [], peds: [], cops: [], bullets: [], pickups: [], particles: [], texts: [], skidMarks: [],
     heat: 0, wanted: 0, heatCool: 0, money: 0, bank: 0,
     mission: null, missionsDone: 0, missionTimer: 0, surviveTimer: 0,
     district: null, districtT: 0, dialog: null, dialogT: 0, cityTaken: false,
@@ -235,11 +235,20 @@ export function step(world, input, dt) {
   updateCops(world, dt);
   updateBullets(world, dt);
   updateParticles(world, dt);
+  updateSkidMarks(world, dt);
   updateHeat(world, dt);
   updateMission(world, dt);
   updateDistrict(world, dt);
 
   if (world.dialogT > 0) world.dialogT -= dt;
+
+  // balance: slow out-of-combat regen so WASTED doesn't come too fast
+  const p = world.player;
+  if (!world.dead && !world.busted && p.hp < p.maxHp && world.cops.length === 0 && world.wanted === 0) {
+    p.hp = Math.min(p.maxHp, p.hp + 3 * dt);
+  }
+  // balance: BUSTED grace — a cop must stay close for 0.8s to pinch you
+  if (world.bustedGrace > 0) world.bustedGrace -= dt;
 
   for (const t of world.texts) t.life -= dt;
   world.texts = world.texts.filter((t) => t.life > 0);
@@ -328,22 +337,45 @@ function updatePlayer(world, input, dt) {
       raiseHeat(world, world.wanted < 1 ? 1 : 0, world.wanted < 1 ? 'Firearm discharged!' : null);
     }
   } else {
-    // driving
+    // driving — analog-style: velocity-based with smooth accel, light drift, skid marks
     const c = p.car;
     const throttle = -ay;
-    if (throttle > 0) c.speed = Math.min(CAR.maxSpeed, c.speed + CAR.accel * dt);
-    else if (throttle < 0) c.speed = Math.max(CAR.reverse, c.speed - CAR.brake * dt);
-    else c.speed *= Math.pow(0.4, dt);
+    // smooth longitudinal control: throttle ramps, brakes bite harder
+    if (throttle > 0) c.speed = Math.min(CAR.maxSpeed, c.speed + CAR.accel * throttle * dt);
+    else if (throttle < 0) c.speed = Math.max(CAR.reverse, c.speed + CAR.brake * throttle * dt);
+    else c.speed *= Math.pow(CAR.coastDrag, dt);
+    const braking = throttle < 0 && c.speed > 0;
+    // steering scales with speed (full authority at low speed, tapers at top end)
+    const steerAuth = clamp(Math.abs(c.speed) / 60, 0, 1) * (1 - 0.4 * Math.abs(c.speed) / CAR.maxSpeed);
     const grip = 1 - Math.min(0.7, Math.abs(c.speed) / CAR.maxSpeed) * 0.55;
-    if (ax) c.angle += ax * CAR.turn * dt * grip * Math.sign(c.speed || 1);
-    const nx = c.x + Math.cos(c.angle) * c.speed * dt;
-    const ny = c.y + Math.sin(c.angle) * c.speed * dt;
+    if (ax) c.angle += ax * CAR.turn * dt * grip * steerAuth * Math.sign(c.speed || 1);
+    // light drift: velocity lags behind the heading at speed, more when braking hard
+    const speedRatio = Math.abs(c.speed) / CAR.maxSpeed;
+    const slip = braking && speedRatio > 0.55 ? CAR.driftSlip - 0.12 : CAR.driftSlip;
+    const fwd = Math.cos(c.angle) * c.speed;
+    const lat = Math.sin(c.angle) * c.speed;
+    const smooth = 1 - Math.pow(slip, dt * 6);
+    c.vx = (c.vx || 0) + (fwd - (c.vx || 0)) * smooth;
+    c.vy = (c.vy || 0) + (lat - (c.vy || 0)) * smooth;
+    const nx = c.x + c.vx * dt;
+    const ny = c.y + c.vy * dt;
     if (isDrivable(world, nx, c.y)) c.x = nx;
-    else { c.speed *= -0.3; damageCar(world, c, 4); }
+    else { c.vx *= -0.3; c.speed *= -0.3; damageCar(world, c, 4); }
     if (isDrivable(world, c.x, ny)) c.y = ny;
-    else { c.speed *= -0.3; damageCar(world, c, 4); }
+    else { c.vy *= -0.3; c.speed *= -0.3; damageCar(world, c, 4); }
     c.x = clamp(c.x, TILE, WORLD_W - TILE);
     c.y = clamp(c.y, TILE, WORLD_H - TILE);
+    // skid marks when braking hard or drifting wide
+    const sideways = Math.hypot(c.vx - fwd, c.vy - lat);
+    if ((braking && c.speed > CAR.skidSpeed) || sideways > 55) {
+      for (let s = -1; s <= 1; s += 2) {
+        world.skidMarks.push({
+          x: c.x + Math.cos(c.angle + Math.PI / 2) * s * 10,
+          y: c.y + Math.sin(c.angle + Math.PI / 2) * s * 10,
+          life: 3.5, max: 3.5,
+        });
+      }
+    }
     p.x = c.x;
     p.y = c.y;
     p.angle = c.angle;
@@ -440,8 +472,25 @@ function updateTraffic(world, dt) {
     const ty = Math.round(c.y / TILE);
     const gx = tx % 6;
     const gy = ty % 6;
-    const horiz = gy === 0 || gy === 1;
-    let want = horiz ? (gx === 0 ? 0 : Math.PI) : (gy === 0 ? Math.PI / 2 : -Math.PI / 2);
+    // at an intersection (both coords on a road band) commit to a turning choice
+    let horiz = gy === 0 || gy === 1;
+    if (!c.turnChoice) {
+      const cross = (horiz && (gx === 0 || gx === 1)) || (!horiz && (gy === 0 || gy === 1));
+      if (cross && (gx === 0 || gy === 0)) {
+        // entering an intersection: mostly straight, sometimes turn onto the crossing road
+        c.turnChoice = Math.random() < 0.68 ? 'straight' : (Math.random() < 0.5 ? 'left' : 'right');
+        c.turnT = 1.4;
+      }
+    }
+    let want;
+    if (c.turnChoice && c.turnChoice !== 'straight' && c.turnT > 0) {
+      c.turnT -= dt;
+      const base = horiz ? (gx === 1 ? Math.PI : 0) : (gy === 1 ? -Math.PI / 2 : Math.PI / 2);
+      want = base + (c.turnChoice === 'left' ? Math.PI / 2 : -Math.PI / 2);
+    } else {
+      if (c.turnT !== undefined && c.turnT <= 0) c.turnChoice = null;
+      want = horiz ? (gx === 0 ? 0 : Math.PI) : (gy === 0 ? Math.PI / 2 : -Math.PI / 2);
+    }
     if (world.wanted >= 3 && dist2(c.x, c.y, p.x, p.y) < 200 * 200) {
       // flee
       want = Math.atan2(c.y - p.y, c.x - p.x);
@@ -462,6 +511,15 @@ function updateTraffic(world, dt) {
       }
     }
     if (!blocked && p.onFoot && dist2(lx, ly, p.x, p.y) < 26 * 26) blocked = true;
+    // stuck honking: blocked for a while means a polite (then impatient) honk
+    if (blocked && Math.abs(c.speed) < 12) {
+      c.stuckT = (c.stuckT || 0) + dt;
+      c.honk -= dt;
+      if (c.stuckT > 1.2 && c.honk <= 0) {
+        c.honk = 2.5 + Math.random() * 2;
+        if (dist2(c.x, c.y, p.x, p.y) < 700 * 700) world.audio && world.audio.honk();
+      }
+    } else c.stuckT = 0;
     const target = blocked ? 0 : (world.wanted >= 3 ? TRAFFIC_SPEED * 1.5 : TRAFFIC_SPEED);
     c.speed += clamp(target - c.speed, -260 * dt, 130 * dt);
     c.x += Math.cos(c.angle) * c.speed * dt;
@@ -506,17 +564,41 @@ function updatePeds(world, dt) {
       ped.panic -= dt;
       const away = Math.atan2(ped.y - p.y, ped.x - p.x);
       ped.angle = away + Math.sin(world.time * 6 + ped.phase) * 0.6;
+      // also flee any car closing fast, not just the player
+      for (const c of world.cars) {
+        if (c.burn || c.role === 'wreck' || c.role === 'parked') continue;
+        if (Math.abs(c.speed) > 80 && dist2(c.x, c.y, ped.x, ped.y) < 130 * 130) {
+          ped.angle = Math.atan2(ped.y - c.y, ped.x - c.x);
+          break;
+        }
+      }
       const s = 70;
       const nx = ped.x + Math.cos(ped.angle) * s * dt;
       const ny = ped.y + Math.sin(ped.angle) * s * dt;
       if (isWalkable(world, nx, ped.y)) ped.x = nx;
       if (isWalkable(world, ped.x, ny)) ped.y = ny;
     } else {
-      // wander sidewalks; turn at random
+      // sidewalk life: prefer to stay on walkable tiles, straighten toward the
+      // nearest sidewalk axis and cross the road occasionally
+      if (Math.random() < dt * 0.25) ped.jaywalk = 2 + Math.random() * 2;
+      const tx2 = Math.floor(ped.x / TILE);
+      const ty2 = Math.floor(ped.y / TILE);
+      const onSidewalk = isWalkable(world, ped.x, ped.y);
+      if (ped.jaywalk > 0) {
+        ped.jaywalk -= dt;
+        // cut straight across, ignoring the sidewalk guidance
+      } else if (onSidewalk && Math.random() < dt * 1.5) {
+        // snap gently toward walking along the sidewalk axis
+        const txMod = tx2 % 6;
+        const tyMod = ty2 % 6;
+        const walkingX = Math.abs(Math.cos(ped.angle)) > Math.abs(Math.sin(ped.angle));
+        if (tyMod >= 2 && tyMod < 6 && !walkingX) ped.angle = Math.random() < 0.5 ? 0 : Math.PI;
+        else if (txMod >= 2 && txMod < 6 && walkingX) ped.angle = Math.random() < 0.5 ? Math.PI / 2 : -Math.PI / 2;
+      }
       if (Math.random() < dt * 0.6) ped.angle += (Math.random() - 0.5) * 1.6;
       const nx = ped.x + Math.cos(ped.angle) * ped.speed * dt;
       const ny = ped.y + Math.sin(ped.angle) * ped.speed * dt;
-      if (isWalkable(world, nx, ny)) { ped.x = nx; ped.y = ny; }
+      if (isWalkable(world, nx, ny) || ped.jaywalk > 0) { ped.x = nx; ped.y = ny; }
       else ped.angle += Math.PI / 2 + Math.random();
     }
     ped.x = clamp(ped.x, TILE, WORLD_W - TILE);
@@ -590,6 +672,40 @@ function updateCops(world, dt) {
   const wantCops = world.wanted > 0 ? Math.min(6, world.wanted * 2) : 0;
   const cars = world.cops.filter((c) => c.role === 'cop');
   if (cars.length < wantCops && Math.random() < dt * 0.8) spawnCop(world);
+  // roadblocks at 4-5 stars: park two cop cars across the road ahead of the player
+  if (world.wanted >= 4 && !world.roadblockCd) world.roadblockCd = 0;
+  if (world.wanted >= 4) {
+    world.roadblockCd -= dt;
+    if (world.roadblockCd <= 0 && cars.length >= 2) {
+      world.roadblockCd = 14;
+      const pcar = p.onFoot ? null : p.car;
+      if (pcar && Math.abs(pcar.speed) > 60) {
+        const ahead = 620;
+        const bx = p.x + Math.cos(pcar.angle) * ahead;
+        const by = p.y + Math.sin(pcar.angle) * ahead;
+        if (isDrivable(world, bx, by)) {
+          const ang = pcar.angle;
+          for (let i = 0; i < 2; i++) {
+            const off = (i === 0 ? -1 : 1) * 22;
+            const rx = bx + Math.cos(ang + Math.PI / 2) * off;
+            const ry = by + Math.sin(ang + Math.PI / 2) * off;
+            if (!isDrivable(world, rx, ry)) continue;
+            const rb = makeCar(rx, ry, ang + Math.PI / 2, '#20242c', 'cop');
+            rb.roadblock = true;
+            world.cops.push(rb);
+            world.cars.push(rb);
+          }
+          addText(world, p.x, p.y - 40, 'ROADBLOCK AHEAD!', '#e04f3f');
+        }
+      }
+    }
+  } else if (world.wanted < 3) {
+    // dissolve roadblocks when the heat drops
+    for (const c of world.cops) if (c.roadblock) c.despawn = true;
+    world.cars = world.cars.filter((c) => !c.despawn);
+    world.cops = world.cops.filter((c) => c.role === 'cop' && !c.despawn);
+    if (world.wanted < 4) world.roadblockCd = 0;
+  }
   if (world.wanted === 0) {
     // cops give up and drive off
     for (const c of world.cops) {
@@ -601,12 +717,31 @@ function updateCops(world, dt) {
 
   for (const cop of world.cops) {
     if (cop.role === 'cop') {
-      // police car: chase player, try to ram; at 1 star mostly block the road
+      // parked roadblock cars hold position
+      if (cop.roadblock) { cop.speed = 0; continue; }
+      // police car: chase with pursuit prediction; PIT when alongside; roadblocks at 4-5 stars
       const d = Math.hypot(p.x - cop.x, p.y - cop.y);
-      let da = Math.atan2(p.y - cop.y, p.x - cop.x) - cop.angle;
+      // predict where the player will be: lead the target by their velocity
+      const lead = p.onFoot ? 0 : Math.min(0.9, d / 420);
+      let aimX = p.x;
+      let aimY = p.y;
+      if (!p.onFoot && p.car) {
+        aimX += (p.car.vx || Math.cos(p.car.angle) * p.car.speed) * lead;
+        aimY += (p.car.vy || Math.sin(p.car.angle) * p.car.speed) * lead;
+      }
+      let da = Math.atan2(aimY - cop.y, aimX - cop.x) - cop.angle;
       while (da > Math.PI) da -= Math.PI * 2;
       while (da < -Math.PI) da += Math.PI * 2;
       cop.angle += clamp(da, -3 * dt, 3 * dt);
+      // PIT maneuver: when alongside and roughly parallel, nudge into the player's flank
+      if (!p.onFoot && p.car && world.wanted >= 3) {
+        const along = Math.abs(Math.cos(cop.angle - p.car.angle));
+        if (d < 52 && along < 0.45 && Math.abs(cop.speed) > 120) {
+          const side = Math.sign(Math.sin(cop.angle - p.car.angle)) || 1;
+          cop.x += Math.cos(cop.angle + Math.PI / 2) * side * 90 * dt;
+          cop.y += Math.sin(cop.angle + Math.PI / 2) * side * 90 * dt;
+        }
+      }
       const target = d > 90 ? COP_BASE_SPEED + world.wanted * 22 : 0;
       cop.speed += clamp(target - cop.speed, -400 * dt, 220 * dt);
       const nx = cop.x + Math.cos(cop.angle) * cop.speed * dt;
@@ -648,17 +783,21 @@ function updateCops(world, dt) {
       if (d < 26) hurtPlayer(world, 12 * dt * 3);
     }
   }
-  // busted check: cop car close while player on foot and slow
+  // busted check: cop car close while player on foot and slow — with a grace period
   if (world.wanted > 0 && p.onFoot) {
+    let close = false;
     for (const c of world.cops) {
-      if (c.role === 'cop' && dist2(c.x, c.y, p.x, p.y) < 42 * 42) {
+      if (c.role === 'cop' && dist2(c.x, c.y, p.x, p.y) < 42 * 42) { close = true; break; }
+    }
+    if (close) {
+      world.bustedGrace = (world.bustedGrace || 0) + dt;
+      if (world.bustedGrace >= 0.8) {
         world.busted = true;
         world.deadTimer = 0;
         world.audio && world.audio.sirenSet(false);
         world.events.push(EV_BUSTED);
-        break;
       }
-    }
+    } else world.bustedGrace = 0;
   }
   // foot cops die when shot
   world.cops = world.cops.filter((c) => c.role === 'cop' || c.hp > 0);
@@ -667,6 +806,7 @@ function updateCops(world, dt) {
 function hurtPlayer(world, amount) {
   const p = world.player;
   p.hp -= amount;
+  if (world.mission) world.missionDamage = (world.missionDamage || 0) + amount;
   world.audio && world.audio.hurt();
   if (p.hp <= 0 && !world.dead && !world.busted) {
     world.dead = true;
@@ -759,6 +899,12 @@ function updateParticles(world, dt) {
   world.particles = world.particles.filter((pt) => pt.life > 0);
 }
 
+function updateSkidMarks(world, dt) {
+  if (world.skidMarks.length === 0) return;
+  for (const s of world.skidMarks) s.life -= dt;
+  world.skidMarks = world.skidMarks.filter((s) => s.life > 0);
+}
+
 // --- districts ---
 
 function districtName(world, tx, ty) {
@@ -807,6 +953,7 @@ export function startMission(world) {
     }
   }
   world.mission = mission;
+  world.missionDamage = 0;
   world.surviveTimer = 0;
   world.dialog = m.dialog;
   world.dialogT = 6.5;
@@ -816,9 +963,19 @@ export function startMission(world) {
 
 function completeMission(world) {
   if (!world.mission) return;
-  world.money += world.mission.reward;
+  // economy: rewards scale with progress so later jobs pay meaningfully more
+  const progressMult = 1 + world.missionsDone * 0.18;
+  let reward = Math.round(world.mission.reward * progressMult);
+  // streak bonus: finish the job without taking damage for a clean-run bonus
+  if (world.missionDamage === 0) {
+    const bonus = Math.round(reward * 0.25);
+    reward += bonus;
+    addText(world, world.player.x, world.player.y - 58, `CLEAN RUN +$${bonus}`, COLORS.gold);
+  } else {
+    world.missionDamage = 0;
+  }
+  world.money += reward;
   world.missionsDone++;
-  const reward = world.mission.reward;
   world.mission = null;
   world.audio && world.audio.mission();
   world.audio && world.audio.cash();
